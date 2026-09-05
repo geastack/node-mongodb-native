@@ -2,6 +2,13 @@
 
 The official [MongoDB](https://www.mongodb.com/) driver for Node.js.
 
+> [!NOTE]
+> This GeaStack fork adds [`src/gea.ts`](src/gea.ts), a typed direct-OP_MSG
+> entry used only by native geatsc source builds. It is a documented subset of
+> the official driver and does not change the ordinary Node.js package entry.
+> See [`docs/GEA_NATIVE.md`](docs/GEA_NATIVE.md) for its API, pool contract,
+> integration requirements, and current limits.
+
 **Upgrading to version 7? Take a look at our [upgrade guide here](https://github.com/mongodb/node-mongodb-native/blob/HEAD/etc/notes/CHANGES_7.0.0.md)!**
 
 ## Quick Links
