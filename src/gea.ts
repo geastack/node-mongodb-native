@@ -1,7 +1,9 @@
 import { deserialize, ObjectId, serialize, type Document } from 'bson'
 import { Buffer } from 'node:buffer'
 
-declare function __gea_node_mongodb_exchange(host: string, port: number, request: Buffer): Buffer
+declare function __gea_node_mongodb_pool_open(host: string, port: number, maxSize: number): number
+declare function __gea_node_mongodb_pool_exchange(poolId: number, request: Buffer): Buffer
+declare function __gea_node_mongodb_pool_close(poolId: number): void
 
 export { ObjectId }
 export type { Document }
@@ -10,6 +12,7 @@ export interface MongoClientOptions {
   connectTimeoutMS?: number
   serverSelectionTimeoutMS?: number
   socketTimeoutMS?: number
+  maxPoolSize?: number
 }
 
 export class InsertOneResult {
@@ -32,33 +35,41 @@ export class DeleteResult {
  * The MongoDB OP_MSG transport needed by the native application.
  *
  * This deliberately stays at the wire protocol boundary: BSON is compiled
- * from the vendored official package and the bytes travel over node:net's
- * native socket. Commands are serialized one at a time, which matches the
- * application's awaited CRUD flow and avoids pretending this small native
- * surface implements the official driver's pool, auth, TLS, or retry layers.
+ * from the vendored official package and the bytes travel over pooled native
+ * sockets. The synchronous host exchange leases a connection for one command
+ * and returns it to the client-owned pool before resolving the Promise.
  */
 class WireConnection {
   private readonly host_: string
   private readonly port_: number
   private readonly timeoutMs_: number
+  private readonly maxPoolSize_: number
   private connected_: boolean
   private requestId_: number
+  private poolId_: number
 
-  constructor(host: string, port: number, timeoutMs: number) {
+  constructor(host: string, port: number, timeoutMs: number, maxPoolSize: number) {
     this.host_ = host
     this.port_ = port
     this.timeoutMs_ = timeoutMs
+    this.maxPoolSize_ = maxPoolSize
     this.connected_ = false
     this.requestId_ = 1
+    this.poolId_ = 0
   }
 
   connect(): Promise<void> {
+    if (this.connected_) return Promise.resolve()
+    this.poolId_ = __gea_node_mongodb_pool_open(this.host_, this.port_, this.maxPoolSize_)
     this.connected_ = true
     void this.timeoutMs_
     return Promise.resolve()
   }
 
   close(): void {
+    if (!this.connected_) return
+    __gea_node_mongodb_pool_close(this.poolId_)
+    this.poolId_ = 0
     this.connected_ = false
   }
 
@@ -77,7 +88,7 @@ class WireConnection {
     message.set(bson, 21)
     this.requestId_ += 1
 
-    const response = __gea_node_mongodb_exchange(this.host_, this.port_, message)
+    const response = __gea_node_mongodb_pool_exchange(this.poolId_, message)
     if (response.length < 21 || response.readInt32LE(12) !== 2013 || response.readUInt8(20) !== 0) {
       throw new Error('MongoDB returned an unsupported wire message')
     }
@@ -190,7 +201,12 @@ export class MongoClient {
     const separator = authority.lastIndexOf(':')
     const host = separator < 0 ? authority : authority.slice(0, separator)
     const parsedPort = separator < 0 ? 27017 : Number(authority.slice(separator + 1))
-    this.wire_ = new WireConnection(host || '127.0.0.1', parsedPort || 27017, options.socketTimeoutMS ?? 0)
+    this.wire_ = new WireConnection(
+      host || '127.0.0.1',
+      parsedPort || 27017,
+      options.socketTimeoutMS ?? 0,
+      options.maxPoolSize ?? 4
+    )
   }
 
   async connect(): Promise<this> {
